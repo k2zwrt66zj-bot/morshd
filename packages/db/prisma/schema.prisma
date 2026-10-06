@@ -1,0 +1,1004 @@
+// =====================================================================
+//  Database schema — منصة التحضير لاختبار الرخصة المهنية (الموجّه الطلابي)
+//  PostgreSQL 16+ with extensions: pg_trgm, unaccent (optional), vector (pgvector)
+//
+//  Conventions
+//  - ids are cuid2 strings; timestamps are UTC.
+//  - Arabic text is stored twice where it is searchable: the original text
+//    (shown to users) and a `*Norm` column produced by the shared Arabic
+//    normalizer (packages/core/arabic). Search/dedup only ever use *Norm.
+//  - tsvector / vector columns and their GIN/HNSW indexes are added in raw
+//    SQL migrations (Prisma models them as Unsupported).
+// =====================================================================
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["postgresqlExtensions"]
+}
+
+datasource db {
+  provider   = "postgresql"
+  url        = env("DATABASE_URL")
+  extensions = [pg_trgm, vector]
+}
+
+// ---------------------------------------------------------------------
+//  1. Identity & accounts
+// ---------------------------------------------------------------------
+
+enum Role {
+  STUDENT
+  EDITOR // can review/publish content
+  ADMIN // founder: everything incl. users & analytics
+}
+
+enum Specialization {
+  SOCIOLOGY
+  SOCIAL_WORK
+  PSYCHOLOGY
+  OTHER
+}
+
+model User {
+  id             String          @id @default(cuid())
+  name           String
+  email          String?         @unique
+  phone          String?         @unique
+  emailVerified  Boolean         @default(false)
+  image          String?
+  role           Role            @default(STUDENT)
+  specialization Specialization?
+  // onboarding answers that drive the study plan
+  targetTracks   TrackCode[] // which tests the user is preparing for
+  examDate       DateTime?       @db.Date
+  dailyMinutes   Int? // available study time per day
+  placementDone  Boolean         @default(false)
+  timezone       String          @default("Asia/Riyadh")
+  createdAt      DateTime        @default(now())
+  updatedAt      DateTime        @updatedAt
+  deletedAt      DateTime? // soft delete (PDPL erasure runs a hard-delete job)
+
+  // auth-library tables (Better Auth)
+  sessions AuthSession[]
+  accounts AuthAccount[]
+
+  attempts       ExamAttempt[]
+  answers        UserAnswer[]
+  bookmarks      Bookmark[]
+  wrongAnswers   WrongAnswer[]
+  plans          StudyPlan[]
+  studySessions  StudySession[]
+  mastery        TopicProgress[]
+  dailyActivity  DailyActivity[]
+  reports        QuestionReport[]
+  conversations  AiConversation[]
+  lessonProgress LessonProgress[]
+
+  // staff-side relations
+  uploadedFiles File[]     @relation("FileUploader")
+  reviews       Review[]   @relation("Reviewer")
+  authored      Question[] @relation("QuestionAuthor")
+  auditLogs     AuditLog[]
+  purchases     Purchase[]
+}
+
+model AuthSession {
+  id        String   @id @default(cuid())
+  userId    String
+  token     String   @unique
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model AuthAccount {
+  id           String    @id @default(cuid())
+  userId       String
+  providerId   String // "credential" | "google" | "apple" | "email-otp"
+  accountId    String
+  password     String? // hashed, only for credential provider
+  accessToken  String?
+  refreshToken String?
+  expiresAt    DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+model AuthVerification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+
+  @@index([identifier])
+}
+
+// ---------------------------------------------------------------------
+//  2. Taxonomy:  Track (الاختبار) → Category (المجال) → Topic (المحور/الموضوع)
+//                + Concept (المفهوم/المصطلح) as a cross-cutting graph
+// ---------------------------------------------------------------------
+
+enum TrackCode {
+  GENERAL // الاختبار التربوي العام
+  COUNSELOR // الاختبار التخصصي — التوجيه الطلابي
+}
+
+model Track {
+  id          String         @id @default(cuid())
+  code        TrackCode      @unique
+  nameAr      String
+  description String?
+  // official blueprint as published (question count, duration, pass mark…)
+  blueprint   Json?
+  categories  Category[]
+  questions   Question[]
+  templates   ExamTemplate[]
+  standards   Standard[]
+}
+
+/// المجال — mirrors the official domains/standards; `weight` drives
+/// mock-exam blueprints and the readiness score.
+model Category {
+  id        String     @id @default(cuid())
+  trackId   String
+  code      String // e.g. "C2" — stable code for imports
+  nameAr    String
+  weight    Decimal?   @db.Decimal(5, 2) // % of the real exam, if published
+  order     Int        @default(0)
+  track     Track      @relation(fields: [trackId], references: [id])
+  topics    Topic[]
+  questions Question[]
+
+  @@unique([trackId, code])
+}
+
+/// المحور (parentId = null) and الموضوع (parentId = محور) in one tree.
+model Topic {
+  id           String          @id @default(cuid())
+  categoryId   String
+  parentId     String?
+  slug         String          @unique
+  nameAr       String
+  nameEn       String?
+  order        Int             @default(0)
+  category     Category        @relation(fields: [categoryId], references: [id])
+  parent       Topic?          @relation("TopicTree", fields: [parentId], references: [id])
+  children     Topic[]         @relation("TopicTree")
+  questions    Question[]      @relation("QuestionTopic")
+  subQuestions Question[]      @relation("QuestionSubtopic")
+  lessons      Lesson[]
+  concepts     Concept[]
+  progress     TopicProgress[]
+  planTasks    StudyTask[]
+
+  @@index([categoryId])
+}
+
+/// مفهوم/مصطلح — e.g. "تكلفة الاستجابة" (Response cost). Powers the glossary,
+/// flashcards, search and the "مفاهيم متشابهة" (confusable concepts) drills.
+model Concept {
+  id           String            @id @default(cuid())
+  topicId      String?
+  nameAr       String
+  nameEn       String?
+  nameNorm     String // normalized for search
+  definition   String? // reviewed definition shown to students
+  sourceRefs   Json? // [{sourceId, page}]
+  topic        Topic?            @relation(fields: [topicId], references: [id])
+  questions    QuestionConcept[]
+  relationsOut ConceptRelation[] @relation("From")
+  relationsIn  ConceptRelation[] @relation("To")
+
+  @@index([nameNorm])
+}
+
+enum ConceptRelationType {
+  CONFUSABLE_WITH // تكلفة الاستجابة ↔ العقاب السلبي ↔ الإقصاء
+  PART_OF
+  OPPOSITE_OF
+  SAME_AS
+}
+
+model ConceptRelation {
+  fromId String
+  toId   String
+  type   ConceptRelationType
+  note   String? // the distinguishing rule, e.g. "الإقصاء = سحب من بيئة التعزيز"
+  from   Concept             @relation("From", fields: [fromId], references: [id], onDelete: Cascade)
+  to     Concept             @relation("To", fields: [toId], references: [id], onDelete: Cascade)
+
+  @@id([fromId, toId, type])
+}
+
+/// Official ETEC framework: مجال → معيار → مؤشر, versioned by the document it
+/// comes from. Kept SEPARATE from the pedagogical Topic tree so the bank can be
+/// re-mapped when ETEC publishes new standards without rewriting questions.
+enum StandardLevel {
+  DOMAIN // مجال
+  STANDARD // معيار
+  INDICATOR // مؤشر
+}
+
+model Standard {
+  id        String             @id @default(cuid())
+  trackId   String
+  sourceId  String // the official document + edition it was taken from
+  parentId  String?
+  level     StandardLevel
+  code      String // e.g. "C.2.3"
+  textAr    String
+  weight    Decimal?           @db.Decimal(5, 2) // % if published
+  verified  Boolean            @default(false) // true only after reading the official PDF
+  track     Track              @relation(fields: [trackId], references: [id])
+  source    Source             @relation(fields: [sourceId], references: [id])
+  parent    Standard?          @relation("StandardTree", fields: [parentId], references: [id])
+  children  Standard[]         @relation("StandardTree")
+  questions QuestionStandard[]
+
+  @@unique([sourceId, code])
+}
+
+model QuestionStandard {
+  questionId String
+  standardId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  standard   Standard @relation(fields: [standardId], references: [id], onDelete: Cascade)
+
+  @@id([questionId, standardId])
+}
+
+// ---------------------------------------------------------------------
+//  3. Sources & files  (provenance of every piece of content)
+// ---------------------------------------------------------------------
+
+enum SourceType {
+  OFFICIAL // ETEC / Ministry published material, sample tests
+  REGULATION // e.g. قواعد السلوك والمواظبة — versioned
+  RECALLED_EXAM // أسئلة استرجاع من مختبرين (like the 1440 Telegram file)
+  COMPILATION // تجميعات
+  STUDY_NOTES // ملخصات/مذكرات/ملازم
+  BOOK
+  TEAM_AUTHORED
+  AI_GENERATED
+}
+
+model Source {
+  id                 String               @id @default(cuid())
+  type               SourceType
+  title              String
+  author             String?
+  yearHijri          Int? // 1440
+  yearGreg           Int?
+  reliability        Int                  @default(3) // 1..5, set by the founder
+  url                String?
+  notes              String?
+  // edition registry (regulations, guides, standards documents)
+  issuer             String? // هيئة تقويم التعليم والتدريب / وزارة التعليم …
+  edition            String? // "الإصدار الخامس 1447هـ"
+  isCurrent          Boolean              @default(true)
+  supersededById     String?
+  // usage rights: competitors' ملازم/تجميعات are ANALYSIS_ONLY (topic signal, never published)
+  rights             SourceRights         @default(ANALYSIS_ONLY)
+  supersededBy       Source?              @relation("Supersedes", fields: [supersededById], references: [id])
+  supersedes         Source[]             @relation("Supersedes")
+  files              File[]
+  occurrences        QuestionOccurrence[]
+  chunks             ContentChunk[]
+  standards          Standard[]
+  regulatedQuestions Question[]           @relation("RegulationSource")
+  createdAt          DateTime             @default(now())
+}
+
+enum SourceRights {
+  OWNED // written by us / the founder
+  OFFICIAL_PUBLIC // government publications — cite, quote briefly
+  PERMITTED // explicit permission from the author
+  ANALYSIS_ONLY // may be analysed for topics/frequency; items are rewritten, never copied
+}
+
+enum FileStatus {
+  UPLOADED
+  EXTRACTING
+  EXTRACTED
+  ANALYZING
+  IN_REVIEW
+  DONE
+  FAILED
+}
+
+model File {
+  id           String              @id @default(cuid())
+  sourceId     String?
+  originalName String
+  mimeType     String
+  sizeBytes    Int
+  sha256       String              @unique // identical re-uploads are detected
+  storageKey   String // object-storage key, never a public URL
+  pageCount    Int?
+  status       FileStatus          @default(UPLOADED)
+  stats        Json? // {chunks, questionsFound, duplicates, ocrPages…}
+  uploadedById String
+  createdAt    DateTime            @default(now())
+  source       Source?             @relation(fields: [sourceId], references: [id])
+  uploadedBy   User                @relation("FileUploader", fields: [uploadedById], references: [id])
+  jobs         IngestionJob[]
+  chunks       ContentChunk[]
+  extracted    ExtractedQuestion[]
+}
+
+enum JobStage {
+  EXTRACT_TEXT // text layer / OCR
+  NORMALIZE // Arabic normalization, noise & PII stripping
+  SEGMENT // split into chunks, classify chunk kind
+  EXTRACT_ITEMS // questions, concepts, key points (LLM, structured output)
+  CLASSIFY // map to Category/Topic/Concept, difficulty
+  DEDUPE // exact → trigram → embedding → LLM adjudication
+  EMBED // embeddings for RAG/search
+}
+
+enum JobStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+}
+
+/// Postgres-backed queue: workers claim rows with SELECT … FOR UPDATE SKIP LOCKED.
+model IngestionJob {
+  id         String    @id @default(cuid())
+  fileId     String
+  stage      JobStage
+  status     JobStatus @default(QUEUED)
+  attempts   Int       @default(0)
+  runAfter   DateTime  @default(now())
+  error      String?
+  metrics    Json? // tokens, cost, durations, model + prompt version
+  createdAt  DateTime  @default(now())
+  finishedAt DateTime?
+  file       File      @relation(fields: [fileId], references: [id], onDelete: Cascade)
+
+  @@index([status, runAfter])
+}
+
+enum ChunkKind {
+  QUESTION_BLOCK
+  EXPLANATION
+  STUDY_CONTENT
+  ADVICE // "نصائح المختبرين" — kept as metadata, not content
+  NOISE
+}
+
+/// Page/section-level text. The unit of citation for the AI tutor.
+model ContentChunk {
+  id        String                       @id @default(cuid())
+  fileId    String
+  sourceId  String?
+  page      Int?
+  ordinal   Int
+  kind      ChunkKind?
+  textRaw   String // exactly as extracted
+  textNorm  String // normalized
+  ocr       Boolean                      @default(false)
+  quality   Float? // 0..1 extraction confidence
+  embedding Unsupported("vector(1024)")?
+  // search_tsv tsvector GENERATED … (raw SQL migration)
+  file      File                         @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  source    Source?                      @relation(fields: [sourceId], references: [id])
+  extracted ExtractedQuestion[]
+
+  @@index([fileId, page])
+}
+
+// ---------------------------------------------------------------------
+//  4. Staging area: what the pipeline found, before a human approves it
+// ---------------------------------------------------------------------
+
+enum AnswerStatus {
+  IN_SOURCE // the file states the answer explicitly
+  CANDIDATE_REPORTED // "اخترت النفسي" — a candidate's choice, not a key
+  MISSING // no answer in the file — NEVER auto-filled
+  DISPUTED // sources disagree
+}
+
+enum ExtractionStatus {
+  PENDING
+  NEEDS_EDIT
+  APPROVED // → published as a new Question
+  MERGED // → became an occurrence of an existing Question
+  REJECTED
+}
+
+model ExtractedQuestion {
+  id                  String           @id @default(cuid())
+  fileId              String
+  chunkId             String?
+  page                Int?
+  rawExcerpt          String // verbatim text span from the file
+  stem                String // cleaned stem (MSA), editable
+  stemNorm            String
+  options             Json // [{text, fromSource: bool}]
+  optionsComplete     Boolean // false when "ناسي الخيارات"
+  answerText          String? // only if found in the file
+  answerStatus        AnswerStatus
+  answerEvidence      String? // the exact span that states the answer
+  aiSuggestedAnswer   String? // shown to REVIEWERS only, clearly labeled
+  aiSuggestedWhy      String?
+  explanation         String? // only if present in the file
+  suggestedTopicId    String?
+  suggestedConcepts   Json?
+  difficultyGuess     Int?
+  confidence          Float // overall extraction confidence 0..1
+  flags               String[] // dialect, partial_options, outdated_regulation, image_missing, pii_removed…
+  clusterKey          String? // duplicate cluster within the batch
+  nearestQuestionId   String? // best match among published questions
+  similarity          Float?
+  status              ExtractionStatus @default(PENDING)
+  publishedQuestionId String?
+  createdAt           DateTime         @default(now())
+  file                File             @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  chunk               ContentChunk?    @relation(fields: [chunkId], references: [id])
+  reviews             Review[]
+
+  @@index([status, confidence])
+  @@index([clusterKey])
+}
+
+enum ReviewTarget {
+  EXTRACTED_QUESTION
+  QUESTION
+  LESSON
+}
+
+enum ReviewDecision {
+  APPROVE
+  APPROVE_WITH_EDITS
+  MERGE
+  REJECT
+  REQUEST_ANSWER_VERIFICATION
+}
+
+/// Editorial review trail (who approved what, and why).
+model Review {
+  id                  String             @id @default(cuid())
+  target              ReviewTarget
+  extractedQuestionId String?
+  questionId          String?
+  lessonId            String?
+  reviewerId          String
+  decision            ReviewDecision
+  notes               String?
+  diff                Json? // field-level changes made by the reviewer
+  createdAt           DateTime           @default(now())
+  reviewer            User               @relation("Reviewer", fields: [reviewerId], references: [id])
+  extracted           ExtractedQuestion? @relation(fields: [extractedQuestionId], references: [id])
+  question            Question?          @relation(fields: [questionId], references: [id])
+  lesson              Lesson?            @relation(fields: [lessonId], references: [id])
+}
+
+// ---------------------------------------------------------------------
+//  5. Question bank (published content)
+// ---------------------------------------------------------------------
+
+enum QuestionType {
+  MCQ // single correct option
+  SCENARIO // موقف/حالة + MCQ
+  TRUE_FALSE
+  IMAGE_BASED // chart/graph (e.g. صدق تباعدي)
+}
+
+/// Where the question *text* came from — shown to students as a badge.
+enum QuestionOrigin {
+  SOURCE_VERBATIM // موجود في ملف كما هو
+  SOURCE_RECONSTRUCTED // استرجاع مختبرين، أعيدت صياغته بالفصحى وأكملت خياراته
+  ADAPTED // معدّل من سؤال سابق (parentQuestionId)
+  TEAM_AUTHORED // سؤال تدريبي من فريق المحتوى
+  AI_GENERATED // مولّد بالذكاء الاصطناعي ثم رُوجع
+}
+
+/// How sure we are about the answer key.
+enum AnswerConfidence {
+  VERIFIED // checked against an official/regulatory reference
+  CONSENSUS // multiple independent sources agree
+  SINGLE_SOURCE
+  DISPUTED
+}
+
+enum ContentStatus {
+  DRAFT
+  IN_REVIEW
+  PUBLISHED
+  ARCHIVED
+}
+
+model Question {
+  id                 String           @id @default(cuid())
+  trackId            String
+  categoryId         String
+  topicId            String
+  subtopicId         String?
+  type               QuestionType     @default(MCQ)
+  stem               String
+  stemNorm           String
+  mediaKey           String? // image for IMAGE_BASED
+  explanation        String // why the correct answer is correct
+  reference          String? // book/regulation/page — human readable
+  difficulty         Int              @default(3) // 1..5 editorial
+  origin             QuestionOrigin
+  answerConfidence   AnswerConfidence
+  parentQuestionId   String? // variant / adapted-from
+  regulationSourceId String? // the regulation edition the answer depends on (قواعد السلوك 1447…)
+  // when that Source is superseded, the question is auto-flagged for review
+  status             ContentStatus    @default(DRAFT)
+  isPremium          Boolean          @default(true)
+  version            Int              @default(1)
+  occurrenceCount    Int              @default(0) // how many sources contain it (→ "متكرر")
+  // live statistics (updated by a nightly job)
+  attemptsCount      Int              @default(0)
+  correctRate        Float?
+  avgTimeMs          Int?
+  discrimination     Float? // point-biserial; low = suspicious item
+  createdById        String?
+  publishedAt        DateTime?
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+  // search_tsv tsvector GENERATED, embedding vector(1024) — raw SQL migration
+
+  track            Track                @relation(fields: [trackId], references: [id])
+  category         Category             @relation(fields: [categoryId], references: [id])
+  topic            Topic                @relation("QuestionTopic", fields: [topicId], references: [id])
+  subtopic         Topic?               @relation("QuestionSubtopic", fields: [subtopicId], references: [id])
+  parent           Question?            @relation("Variants", fields: [parentQuestionId], references: [id])
+  variants         Question[]           @relation("Variants")
+  createdBy        User?                @relation("QuestionAuthor", fields: [createdById], references: [id])
+  options          AnswerOption[]
+  regulationSource Source?              @relation("RegulationSource", fields: [regulationSourceId], references: [id])
+  concepts         QuestionConcept[]
+  standards        QuestionStandard[]
+  occurrences      QuestionOccurrence[]
+  revisions        QuestionRevision[]
+  answers          UserAnswer[]
+  bookmarks        Bookmark[]
+  wrongAnswers     WrongAnswer[]
+  reports          QuestionReport[]
+  reviews          Review[]
+
+  @@index([trackId, categoryId, topicId, status])
+  @@index([status, difficulty])
+  @@index([origin])
+}
+
+/// "Answers" — the options of a question.
+model AnswerOption {
+  id         String       @id @default(cuid())
+  questionId String
+  label      String // أ ب ج د (display only — order is shuffled per attempt)
+  text       String
+  isCorrect  Boolean      @default(false)
+  whyWrong   String? // لماذا هذا الخيار خطأ (or why right)
+  order      Int
+  question   Question     @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  answers    UserAnswer[]
+
+  @@index([questionId])
+}
+
+model QuestionConcept {
+  questionId String
+  conceptId  String
+  isPrimary  Boolean  @default(false)
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  concept    Concept  @relation(fields: [conceptId], references: [id], onDelete: Cascade)
+
+  @@id([questionId, conceptId])
+}
+
+/// Every place a question was seen: file, page, year. Frequency = evidence
+/// for "سؤال متكرر" — never a claim that it *will* appear.
+model QuestionOccurrence {
+  id                  String   @id @default(cuid())
+  questionId          String
+  sourceId            String
+  fileId              String?
+  page                Int?
+  yearHijri           Int?
+  rawExcerpt          String
+  extractedQuestionId String?  @unique
+  question            Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  source              Source   @relation(fields: [sourceId], references: [id])
+
+  @@index([questionId])
+}
+
+/// Immutable history of edits (content QA + rollback).
+model QuestionRevision {
+  id         String   @id @default(cuid())
+  questionId String
+  version    Int
+  snapshot   Json
+  editedById String?
+  reason     String?
+  createdAt  DateTime @default(now())
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([questionId, version])
+}
+
+enum ReportReason {
+  UNCLEAR
+  WRONG_ANSWER
+  TYPO
+  OUTDATED
+  DUPLICATE
+  OTHER
+}
+
+enum ReportStatus {
+  OPEN
+  ACCEPTED
+  DISMISSED
+}
+
+model QuestionReport {
+  id         String       @id @default(cuid())
+  questionId String
+  userId     String
+  reason     ReportReason
+  message    String?
+  status     ReportStatus @default(OPEN)
+  resolution String?
+  createdAt  DateTime     @default(now())
+  question   Question     @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+}
+
+// ---------------------------------------------------------------------
+//  6. Study content (ذاكر + المراجعة المكثفة)
+// ---------------------------------------------------------------------
+
+enum LessonKind {
+  TOPIC_LESSON // ذاكر: شرح المحور
+  INTENSIVE // المراجعة المكثفة
+  CONTRAST // مفاهيم متشابهة: الفرق بين…
+  COMMON_MISTAKES // الأخطاء الشائعة
+}
+
+model Lesson {
+  id          String           @id @default(cuid())
+  topicId     String
+  kind        LessonKind       @default(TOPIC_LESSON)
+  title       String
+  body        String // MDX (Arabic), reviewed
+  keyPoints   Json // ["…", "…"]
+  sourceRefs  Json? // [{sourceId, page}] — every claim traceable
+  readMinutes Int              @default(5)
+  order       Int              @default(0)
+  status      ContentStatus    @default(DRAFT)
+  updatedAt   DateTime         @updatedAt
+  topic       Topic            @relation(fields: [topicId], references: [id])
+  progress    LessonProgress[]
+  reviews     Review[]
+}
+
+model LessonProgress {
+  userId      String
+  lessonId    String
+  completedAt DateTime?
+  lastOpened  DateTime  @default(now())
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  lesson      Lesson    @relation(fields: [lessonId], references: [id], onDelete: Cascade)
+
+  @@id([userId, lessonId])
+}
+
+// ---------------------------------------------------------------------
+//  7. Exams & attempts
+// ---------------------------------------------------------------------
+
+enum ExamKind {
+  PLACEMENT // تحديد المستوى
+  GENERAL_MOCK // اختبار عام
+  COUNSELOR_MOCK // اختبار تخصصي
+  FULL_MOCK // شامل
+  QUICK // سريع
+  TOPIC // حسب محور
+  PRACTICE // جلسة تدريب من بنك الأسئلة
+  REVIEW // جلسة مراجعة الأخطاء
+  LESSON_QUIZ // اختبار قصير بعد الدرس
+}
+
+/// "Exams" — reusable definitions. Ad-hoc custom exams store their config on the attempt.
+model ExamTemplate {
+  id               String        @id @default(cuid())
+  trackId          String?
+  kind             ExamKind
+  title            String
+  questionCount    Int
+  durationSec      Int? // null = untimed
+  blueprint        Json? // {categoryCode: count} or weights
+  shuffleQuestions Boolean       @default(true)
+  shuffleOptions   Boolean       @default(true)
+  showFeedback     Boolean       @default(false) // instant feedback (practice) vs end-only (exam)
+  isActive         Boolean       @default(true)
+  track            Track?        @relation(fields: [trackId], references: [id])
+  attempts         ExamAttempt[]
+}
+
+enum AttemptStatus {
+  IN_PROGRESS
+  SUBMITTED
+  EXPIRED // timer ran out — auto-submitted
+  ABANDONED
+}
+
+model ExamAttempt {
+  id            String        @id @default(cuid())
+  userId        String
+  templateId    String?
+  kind          ExamKind
+  config        Json // snapshot: count, duration, filters, seed
+  questionOrder String[] // question ids in presented order
+  status        AttemptStatus @default(IN_PROGRESS)
+  startedAt     DateTime      @default(now())
+  deadlineAt    DateTime? // server-authoritative timer
+  submittedAt   DateTime?
+  durationSec   Int?
+  totalCount    Int
+  correctCount  Int?
+  scorePct      Float?
+  breakdown     Json? // per category/topic: {total, correct, avgTimeMs}
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  template      ExamTemplate? @relation(fields: [templateId], references: [id])
+  answers       UserAnswer[]
+
+  @@index([userId, kind, startedAt])
+}
+
+enum AnswerConfidenceSelf {
+  SURE
+  UNSURE
+  GUESS
+}
+
+model UserAnswer {
+  id               String                @id @default(cuid())
+  userId           String
+  questionId       String
+  attemptId        String?
+  selectedOptionId String? // null = skipped
+  isCorrect        Boolean
+  selfConfidence   AnswerConfidenceSelf? // "متأكد/غير متأكد/تخمين" before reveal
+  timeMs           Int?
+  optionOrder      String[] // shuffled order shown
+  flagged          Boolean               @default(false) // علامة للمراجعة inside an exam
+  createdAt        DateTime              @default(now())
+  user             User                  @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question         Question              @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  attempt          ExamAttempt?          @relation(fields: [attemptId], references: [id], onDelete: Cascade)
+  selectedOption   AnswerOption?         @relation(fields: [selectedOptionId], references: [id])
+
+  @@unique([attemptId, questionId])
+  @@index([userId, createdAt])
+  @@index([questionId])
+}
+
+enum BookmarkKind {
+  FAVORITE // حفظ
+  FLAGGED // علامة للمراجعة
+}
+
+model Bookmark {
+  userId     String
+  questionId String
+  kind       BookmarkKind
+  note       String?
+  createdAt  DateTime     @default(now())
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question   Question     @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, questionId, kind])
+}
+
+// ---------------------------------------------------------------------
+//  8. Smart review of mistakes (FSRS spaced repetition)
+// ---------------------------------------------------------------------
+
+enum CardState {
+  NEW
+  LEARNING
+  REVIEW
+  RELEARNING
+}
+
+/// "WrongAnswers" — one card per (user, question). Enters when the student
+/// answers wrong OR answers right but marked it as a guess. Scheduled by FSRS;
+/// leaves the "تحتاج مراجعة" list once mastered (N successful spaced reviews).
+model WrongAnswer {
+  userId       String
+  questionId   String
+  state        CardState @default(NEW)
+  due          DateTime  @default(now())
+  stability    Float     @default(0)
+  difficulty   Float     @default(0)
+  reps         Int       @default(0)
+  lapses       Int       @default(0)
+  lastReviewAt DateTime?
+  firstWrongAt DateTime  @default(now())
+  wrongCount   Int       @default(1)
+  masteredAt   DateTime?
+  user         User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  question     Question  @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@id([userId, questionId])
+  @@index([userId, masteredAt, due])
+}
+
+// ---------------------------------------------------------------------
+//  9. Progress, plans, sessions
+// ---------------------------------------------------------------------
+
+/// "Progress" — mastery per topic (the engine behind strengths/weaknesses).
+model TopicProgress {
+  userId        String
+  topicId       String
+  mastery       Float     @default(0) // 0..1, recency-weighted, confidence-adjusted
+  attempts      Int       @default(0)
+  correct       Int       @default(0)
+  lastPracticed DateTime?
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  topic         Topic     @relation(fields: [topicId], references: [id], onDelete: Cascade)
+
+  @@id([userId, topicId])
+}
+
+/// Daily roll-up → streaks, heatmap, dashboard charts.
+model DailyActivity {
+  userId    String
+  date      DateTime @db.Date // in the user's timezone
+  questions Int      @default(0)
+  correct   Int      @default(0)
+  minutes   Int      @default(0)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([userId, date])
+}
+
+enum PlanStatus {
+  ACTIVE
+  REPLACED
+  COMPLETED
+}
+
+model StudyPlan {
+  id           String         @id @default(cuid())
+  userId       String
+  examDate     DateTime       @db.Date
+  startDate    DateTime       @db.Date
+  dailyMinutes Int
+  inputs       Json // snapshot: placement result, weak topics, level
+  status       PlanStatus     @default(ACTIVE)
+  version      Int            @default(1) // re-planned when the student falls behind
+  createdAt    DateTime       @default(now())
+  user         User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  days         StudyPlanDay[]
+
+  @@index([userId, status])
+}
+
+model StudyPlanDay {
+  id       String      @id @default(cuid())
+  planId   String
+  date     DateTime    @db.Date
+  dayIndex Int
+  theme    String? // "مراجعة المحور X"
+  plan     StudyPlan   @relation(fields: [planId], references: [id], onDelete: Cascade)
+  tasks    StudyTask[]
+
+  @@unique([planId, date])
+}
+
+enum TaskType {
+  LESSON
+  PRACTICE
+  REVIEW_MISTAKES
+  MOCK_EXAM
+  FLASHCARDS
+  INTENSIVE_REVIEW
+  REST
+}
+
+model StudyTask {
+  id          String         @id @default(cuid())
+  dayId       String
+  type        TaskType
+  topicId     String?
+  targetCount Int? // e.g. 30 questions
+  minutes     Int
+  completedAt DateTime?
+  day         StudyPlanDay   @relation(fields: [dayId], references: [id], onDelete: Cascade)
+  topic       Topic?         @relation(fields: [topicId], references: [id])
+  sessions    StudySession[]
+}
+
+model StudySession {
+  id        String     @id @default(cuid())
+  userId    String
+  taskId    String?
+  activity  ExamKind?
+  startedAt DateTime   @default(now())
+  endedAt   DateTime?
+  minutes   Int?
+  questions Int        @default(0)
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  task      StudyTask? @relation(fields: [taskId], references: [id])
+
+  @@index([userId, startedAt])
+}
+
+// ---------------------------------------------------------------------
+// 10. AI tutor
+// ---------------------------------------------------------------------
+
+model AiConversation {
+  id         String      @id @default(cuid())
+  userId     String
+  questionId String? // when opened from a question ("اشرح لي هذا السؤال")
+  topicId    String?
+  createdAt  DateTime    @default(now())
+  user       User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages   AiMessage[]
+}
+
+model AiMessage {
+  id             String         @id @default(cuid())
+  conversationId String
+  role           String // user | assistant
+  content        Json // full content blocks (kept verbatim for replay)
+  citations      Json? // [{chunkId, sourceTitle, page, quote}]
+  grounded       Boolean        @default(true) // false → answer labeled "خارج مصادر المنصة"
+  inputTokens    Int?
+  outputTokens   Int?
+  createdAt      DateTime       @default(now())
+  conversation   AiConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+}
+
+// ---------------------------------------------------------------------
+// 11. Commerce & audit (later phases)
+// ---------------------------------------------------------------------
+
+model Purchase {
+  id           String    @id @default(cuid())
+  userId       String
+  product      String // "pass-until-exam", "general+counselor"…
+  amountHalala Int
+  provider     String // moyasar | tap
+  providerRef  String    @unique
+  status       String
+  validUntil   DateTime?
+  createdAt    DateTime  @default(now())
+  user         User      @relation(fields: [userId], references: [id])
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  actorId   String
+  action    String // question.publish, file.upload, user.role_change…
+  entity    String
+  entityId  String
+  data      Json?
+  createdAt DateTime @default(now())
+  actor     User     @relation(fields: [actorId], references: [id])
+
+  @@index([entity, entityId])
+}

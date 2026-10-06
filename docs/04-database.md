@@ -91,11 +91,13 @@ erDiagram
 
 ## 5. الفهارس والبحث (هجرة SQL خام)
 
+> **شرط إلزامي:** تُنشأ القاعدة بترميز UTF8 و`LC_CTYPE` = `C.UTF-8` أو ICU. اختُبر أن `pg_trgm` لا يستخرج أي مقطع من النص العربي إذا كان `LC_CTYPE=C`، فيتعطل البحث التقريبي بصمت. فحص آلي عند تشغيل التطبيق: `SELECT show_trgm('عربي')` يجب ألا يكون فارغًا.
+
 ```sql
 CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE EXTENSION IF NOT EXISTS vector;
 
--- بحث نصي على النص المطبّع (إعداد 'simple' لأن التطبيع العربي تم مسبقًا)
+-- بحث نصي على المفتاح المطبّع بإعداد 'simple' (المُجذِّع العربي المدمج فشل في الاختبار على "توجيه/التوجيه")
 ALTER TABLE "Question" ADD COLUMN search_tsv tsvector
   GENERATED ALWAYS AS (to_tsvector('simple', "stemNorm")) STORED;
 CREATE INDEX question_tsv_idx  ON "Question" USING gin (search_tsv);

@@ -257,6 +257,18 @@ model QuestionStandard {
   @@id([questionId, standardId])
 }
 
+/// Domain synonyms applied to search queries and dedup keys:
+/// المرشد ↔ الموجه، الإرشاد ↔ التوجيه، الإقصاء ↔ العزل المؤقت (Time-out)…
+model SearchSynonym {
+  id       String  @id @default(cuid())
+  termNorm String // normalized key form
+  groupKey String // all terms in a group share it
+  note     String?
+
+  @@unique([termNorm, groupKey])
+  @@index([groupKey])
+}
+
 // ---------------------------------------------------------------------
 //  3. Sources & files  (provenance of every piece of content)
 // ---------------------------------------------------------------------

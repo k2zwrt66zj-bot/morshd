@@ -1,5 +1,5 @@
 // =====================================================================
-//  SWAA — database schema
+//  مُرشد (morshd) — database schema
 //  منصة التحضير لاختبار الرخصة المهنية (الموجّه الطلابي / الإرشاد الطلابي)
 //
 //  Target: PostgreSQL 16+, Prisma 6.x (pinned; Prisma 7 moves `url` to prisma.config.ts)
@@ -698,7 +698,7 @@ model ExtractedQuestion {
   difficultyGuess             Int?
   confidence                  Float
   flags                       String[] // dialect, partial_options, outdated_regulation, image_missing, pii_removed…
-  model                       String? // e.g. "claude-opus-5-5"
+  model                       String? // model id used for this extraction
   promptVersion               String?
   // embedding: search.extracted_index (outside Prisma)
   clusterKey                  String?

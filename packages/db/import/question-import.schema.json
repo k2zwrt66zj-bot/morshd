@@ -1,0 +1,546 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "morshd/question-import@1",
+  "title": "مُرشد — question import record",
+  "description": "One reviewed-or-pending question as produced by the content pipeline. Maps 1:1 onto Question, AnswerOption, QuestionConcept, QuestionStandard, QuestionOccurrence and RegulationLink in packages/db/prisma/schema.prisma.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "extraction",
+    "question",
+    "review"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9-]+$"
+    },
+    "extraction": {
+      "description": "What the file actually says (ExtractedQuestion). Never edited.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "file",
+        "page",
+        "rawExcerpt",
+        "optionsComplete",
+        "answerStatus",
+        "flags"
+      ],
+      "properties": {
+        "file": {
+          "type": "string"
+        },
+        "page": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "rawExcerpt": {
+          "type": "string",
+          "minLength": 10
+        },
+        "optionsComplete": {
+          "type": "boolean"
+        },
+        "answerStatus": {
+          "enum": [
+            "IN_SOURCE",
+            "CANDIDATE_REPORTED",
+            "MISSING",
+            "DISPUTED"
+          ]
+        },
+        "answerEvidence": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "flags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "question": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "track",
+        "category",
+        "topic",
+        "type",
+        "stem",
+        "difficulty",
+        "pool",
+        "origin",
+        "answerBasis",
+        "answerConfidence",
+        "keyNotInSource",
+        "scorable",
+        "explanation",
+        "explanationOrigin",
+        "options",
+        "concepts",
+        "standards",
+        "occurrences"
+      ],
+      "properties": {
+        "track": {
+          "enum": [
+            "COUNSELOR",
+            "GENERAL"
+          ]
+        },
+        "category": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "code",
+            "nameAr"
+          ],
+          "properties": {
+            "code": {
+              "type": "string"
+            },
+            "nameAr": {
+              "type": "string"
+            }
+          }
+        },
+        "topic": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "slug",
+            "nameAr"
+          ],
+          "properties": {
+            "slug": {
+              "type": "string"
+            },
+            "nameAr": {
+              "type": "string"
+            },
+            "subtopic": {
+              "type": "string"
+            }
+          }
+        },
+        "type": {
+          "enum": [
+            "MCQ",
+            "SCENARIO",
+            "TRUE_FALSE",
+            "IMAGE_BASED"
+          ]
+        },
+        "stem": {
+          "type": "string",
+          "minLength": 10
+        },
+        "difficulty": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5
+        },
+        "difficultyNote": {
+          "type": "string"
+        },
+        "pool": {
+          "enum": [
+            "PRACTICE",
+            "MOCK",
+            "PLACEMENT"
+          ]
+        },
+        "origin": {
+          "enum": [
+            "SOURCE_VERBATIM",
+            "BASED_ON_RECALL",
+            "ADAPTED",
+            "TEAM_AUTHORED",
+            "AI_GENERATED"
+          ]
+        },
+        "answerBasis": {
+          "enum": [
+            "IN_SOURCE_FILE",
+            "REFERENCE_VERIFIED",
+            "EDITOR_KEYED",
+            "AI_SUGGESTED_VERIFIED",
+            "AI_SUGGESTED_PENDING"
+          ]
+        },
+        "answerConfidence": {
+          "enum": [
+            "VERIFIED",
+            "CONSENSUS",
+            "SINGLE_SOURCE",
+            "DISPUTED"
+          ]
+        },
+        "answerRef": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "source": {
+              "type": "string"
+            },
+            "page": {
+              "type": "string"
+            },
+            "quote": {
+              "type": "string"
+            },
+            "sourceType": {
+              "enum": [
+                "OFFICIAL",
+                "REGULATION",
+                "RECALLED_EXAM",
+                "COMPILATION",
+                "THIRD_PARTY_PRACTICE",
+                "STUDY_NOTES",
+                "BOOK",
+                "TEAM_AUTHORED",
+                "AI_GENERATED"
+              ]
+            },
+            "rights": {
+              "enum": [
+                "OWNED",
+                "OFFICIAL_PUBLIC",
+                "PERMITTED",
+                "ANALYSIS_ONLY"
+              ]
+            }
+          }
+        },
+        "keyNotInSource": {
+          "type": "boolean"
+        },
+        "scorable": {
+          "type": "boolean"
+        },
+        "explanation": {
+          "type": "string",
+          "minLength": 40
+        },
+        "explanationOrigin": {
+          "enum": [
+            "FROM_SOURCE",
+            "TEAM_AUTHORED",
+            "AI_DRAFTED",
+            "FROM_SOURCE_PLUS_AI_DRAFTED"
+          ]
+        },
+        "reference": {
+          "type": "string"
+        },
+        "options": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 4,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "label",
+              "text",
+              "isCorrect",
+              "fromSource",
+              "whyWrong"
+            ],
+            "properties": {
+              "label": {
+                "enum": [
+                  "أ",
+                  "ب",
+                  "ج",
+                  "د"
+                ]
+              },
+              "text": {
+                "type": "string",
+                "minLength": 1
+              },
+              "isCorrect": {
+                "type": "boolean"
+              },
+              "fromSource": {
+                "type": "boolean"
+              },
+              "whyWrong": {
+                "type": "string",
+                "minLength": 15,
+                "description": "for the correct option: why it is right"
+              }
+            }
+          }
+        },
+        "concepts": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "standards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "text",
+              "confidence"
+            ],
+            "properties": {
+              "domain": {
+                "type": "string"
+              },
+              "standard": {
+                "type": "string"
+              },
+              "text": {
+                "type": "string"
+              },
+              "confidence": {
+                "enum": [
+                  "CONFIRMED",
+                  "TENTATIVE"
+                ]
+              }
+            }
+          }
+        },
+        "regulation": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "occurrences": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "source",
+              "sourceType",
+              "rights",
+              "page"
+            ],
+            "properties": {
+              "source": {
+                "type": "string"
+              },
+              "sourceType": {
+                "enum": [
+                  "OFFICIAL",
+                  "REGULATION",
+                  "RECALLED_EXAM",
+                  "COMPILATION",
+                  "THIRD_PARTY_PRACTICE",
+                  "STUDY_NOTES",
+                  "BOOK",
+                  "TEAM_AUTHORED",
+                  "AI_GENERATED"
+                ]
+              },
+              "rights": {
+                "enum": [
+                  "OWNED",
+                  "OFFICIAL_PUBLIC",
+                  "PERMITTED",
+                  "ANALYSIS_ONLY"
+                ]
+              },
+              "page": {
+                "type": "integer"
+              },
+              "yearHijri": {
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "rawExcerpt": {
+                "type": "string"
+              },
+              "note": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "authoring": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "by"
+          ],
+          "properties": {
+            "by": {
+              "enum": [
+                "SOURCE",
+                "TEAM",
+                "AI_DRAFT"
+              ]
+            },
+            "promptVersion": {
+              "type": "string"
+            },
+            "notes": {
+              "type": "string"
+            }
+          }
+        }
+      }
+    },
+    "review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "needs"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "PENDING_FOUNDER",
+            "PENDING_EXPERT",
+            "APPROVED",
+            "REJECTED"
+          ]
+        },
+        "needs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "description": "exactly one correct option",
+      "properties": {
+        "question": {
+          "properties": {
+            "options": {
+              "contains": {
+                "properties": {
+                  "isCorrect": {
+                    "const": true
+                  }
+                }
+              },
+              "minContains": 1,
+              "maxContains": 1
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "scorable needs a strong key",
+      "if": {
+        "properties": {
+          "question": {
+            "properties": {
+              "scorable": {
+                "const": true
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "question": {
+            "properties": {
+              "answerConfidence": {
+                "enum": [
+                  "VERIFIED",
+                  "CONSENSUS"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "a pending AI suggestion is never scorable",
+      "if": {
+        "properties": {
+          "question": {
+            "properties": {
+              "answerBasis": {
+                "const": "AI_SUGGESTED_PENDING"
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "question": {
+            "properties": {
+              "scorable": {
+                "const": false
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "description": "verbatim wording needs at least one source whose rights allow publishing",
+      "if": {
+        "properties": {
+          "question": {
+            "properties": {
+              "occurrences": {
+                "not": {
+                  "contains": {
+                    "properties": {
+                      "rights": {
+                        "enum": [
+                          "OWNED",
+                          "OFFICIAL_PUBLIC",
+                          "PERMITTED"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "question": {
+            "properties": {
+              "origin": {
+                "not": {
+                  "const": "SOURCE_VERBATIM"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
+}

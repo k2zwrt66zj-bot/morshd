@@ -55,7 +55,7 @@
 ## 3. هيكل المستودع (Monorepo)
 
 ```
-SWAA/
+morshd/
 ├─ apps/
 │  └─ web/                      Next.js (App Router)
 │     ├─ app/(marketing)/       الصفحات العامة
